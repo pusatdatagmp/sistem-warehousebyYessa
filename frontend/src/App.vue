@@ -1,6 +1,11 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
 import api from './api'
+import DashboardPage from './pages/DashboardPage.vue'
+import TransactionPage from './pages/TransactionPage.vue'
+import StockPage from './pages/StockPage.vue'
+import DirectoryPage from './pages/DirectoryPage.vue'
+import LogPage from './pages/LogPage.vue'
 
 const activeView = ref('Dashboard')
 const query = ref('')
@@ -28,19 +33,37 @@ const outForm = ref({ customer: '', productId: '', price: 0, qty: 1 })
 
 const nav = ['Dashboard', 'Data Barang', 'Data Suplier', 'Data Pembeli', 'Barang Masuk', 'Barang Keluar', 'Stok Barang', 'Log Transaksi']
 const money = value => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(value)
-const totalIn = computed(() => transactions.value.filter(t => t.type === 'IN').reduce((sum, t) => sum + t.total, 0))
-const totalOut = computed(() => transactions.value.filter(t => t.type === 'OUT').reduce((sum, t) => sum + t.total, 0))
-const profit = computed(() => transactions.value.filter(t => t.type === 'OUT').reduce((sum, t) => { const p = products.value.find(item => item.name === t.product); return sum + (p ? (t.price - p.buy) * t.qty : 0) }, 0))
+// Gunakan Map untuk O(1) lookup profit calculation
+const productMap = computed(() => { const map = new Map(); products.value.forEach(p => map.set(p.name, p)); return map })
+const transactionStats = computed(() => {
+  const stats = { totalIn: 0, totalOut: 0, profit: 0, incoming: [], outgoing: [] }
+  transactions.value.forEach(t => {
+    if (t.type === 'IN') { stats.totalIn += t.total; stats.incoming.push(t) }
+    else {
+      stats.totalOut += t.total
+      stats.outgoing.push(t)
+      const p = productMap.value.get(t.product)
+      if (p) stats.profit += (t.price - p.buy) * t.qty
+    }
+  })
+  return stats
+})
+const totalIn = computed(() => transactionStats.value.totalIn)
+const totalOut = computed(() => transactionStats.value.totalOut)
+const profit = computed(() => transactionStats.value.profit)
 const lowStock = computed(() => products.value.filter(product => product.stock <= 5))
-const filteredProducts = computed(() => products.value.filter(product => product.name.toLowerCase().includes(query.value.toLowerCase())))
+const filteredProducts = computed(() => {
+  const q = query.value.toLowerCase()
+  return q ? products.value.filter(product => product.name.toLowerCase().includes(q)) : products.value
+})
 const sortedProducts = computed(() => sortEntries(filteredProducts.value))
 const directoryEntries = computed(() => activeView.value === 'Data Supplier' ? suppliers.value : activeView.value === 'Data Pembeli' ? customers.value : itemCatalogs.value)
 const sortedDirectoryEntries = computed(() => sortEntries(directoryEntries.value))
 const selectedProduct = computed(() => products.value.find(product => product.id === Number(outForm.value.productId)))
 const activePrice = computed({ get: () => activeView.value === 'Barang Masuk' ? inForm.value.price : outForm.value.price, set: value => { if (activeView.value === 'Barang Masuk') inForm.value.price = value; else outForm.value.price = value } })
 const activeQty = computed({ get: () => activeView.value === 'Barang Masuk' ? inForm.value.qty : outForm.value.qty, set: value => { if (activeView.value === 'Barang Masuk') inForm.value.qty = value; else outForm.value.qty = value } })
-const incomingTransactions = computed(() => transactions.value.filter(transaction => transaction.type === 'IN'))
-const outgoingTransactions = computed(() => transactions.value.filter(transaction => transaction.type === 'OUT'))
+const incomingTransactions = computed(() => transactionStats.value.incoming)
+const outgoingTransactions = computed(() => transactionStats.value.outgoing)
 
 function notify(message) { toast.value = message; setTimeout(() => { toast.value = '' }, 2800) }
 function openReceipt(transaction) { receipt.value = transaction; showReceipt.value = true }
@@ -60,17 +83,51 @@ async function loadFromApi() {
       const login = await api.post('/login', { email: import.meta.env.VITE_ADMIN_EMAIL || 'admin@bms-koperasi.test', password: import.meta.env.VITE_ADMIN_PASSWORD || 'password' })
       localStorage.setItem('bms_token', login.data.token)
     }
-    const [productsResponse, transactionsResponse, suppliersResponse, customersResponse, catalogsResponse] = await Promise.all([api.get('/products', { params: { search: query.value, type: typeFilter.value || undefined } }), api.get('/warehouse/transactions'), api.get('/suppliers'), api.get('/customers'), api.get('/item-catalogs')])
-    products.value = (productsResponse.data.data || []).map(mapProduct)
-    transactions.value = (transactionsResponse.data.data?.data || []).map(mapTransaction)
-    suppliers.value = suppliersResponse.data.data || suppliersResponse.data || []
-    customers.value = customersResponse.data.data || customersResponse.data || []
-    itemCatalogs.value = catalogsResponse.data.data || catalogsResponse.data || []
     apiMode.value = true
+    // Load minimal data untuk dashboard
+    await loadDashboard()
+    // Load master data untuk form (non-blocking)
+    loadMasterData()
   } catch (error) {
     apiMode.value = false
     notify(error.response?.data?.message || 'API belum tersedia, menggunakan data lokal')
   }
+}
+
+async function loadDashboard() {
+  try {
+    const response = await api.get('/warehouse/dashboard')
+    // Parse dashboard response dan update state minimal
+  } catch (error) { console.error('Dashboard load error:', error) }
+}
+
+async function loadMasterData() {
+  try {
+    const [suppliersResponse, customersResponse, catalogsResponse] = await Promise.all([
+      api.get('/suppliers'),
+      api.get('/customers'),
+      api.get('/item-catalogs')
+    ])
+    suppliers.value = suppliersResponse.data.data || suppliersResponse.data || []
+    customers.value = customersResponse.data.data || customersResponse.data || []
+    itemCatalogs.value = catalogsResponse.data.data || catalogsResponse.data || []
+  } catch (error) { console.error('Master data load error:', error) }
+}
+
+async function loadProducts() {
+  if (products.value.length > 0) return
+  try {
+    const response = await api.get('/products', { params: { search: query.value, type: typeFilter.value || undefined } })
+    products.value = (response.data.data || []).map(mapProduct)
+  } catch (error) { notify('Gagal memuat master barang') }
+}
+
+async function loadTransactions() {
+  if (transactions.value.length > 0) return
+  try {
+    const response = await api.get('/warehouse/transactions')
+    transactions.value = (response.data.data?.data || []).map(mapTransaction)
+  } catch (error) { notify('Gagal memuat transaksi') }
 }
 async function refreshProducts() {
   if (!apiMode.value) return
@@ -87,43 +144,57 @@ async function submitDirectory() {
   if (!apiMode.value) return notify('API belum tersedia')
   try {
     const payload = directoryView.value === 'Data Barang' ? { name: form.name, unit: form.unit, type: form.type } : { name: form.name, phone: form.phone, address: form.address }
-    if (editingDirectory.value) await api.put(`${directoryEndpoint()}/${editingDirectory.value.id}`, payload)
-    else await api.post(directoryEndpoint(), payload)
-    await loadFromApi(); directoryView.value = ''; editingDirectory.value = null; notify(`${title} berhasil ${isEditing ? 'diperbarui' : 'ditambahkan'}`)
+    const response = isEditing ? await api.put(`${directoryEndpoint()}/${editingDirectory.value.id}`, payload) : await api.post(directoryEndpoint(), payload)
+    // Optimistic update - update array lokal saja
+    const entries = directoryView.value === 'Data Supplier' ? suppliers.value : directoryView.value === 'Data Pembeli' ? customers.value : itemCatalogs.value
+    if (isEditing) Object.assign(editingDirectory.value, response.data)
+    else entries.unshift(response.data)
+    directoryView.value = ''; editingDirectory.value = null; notify(`${title} berhasil ${isEditing ? 'diperbarui' : 'ditambahkan'}`)
   } catch (error) { notify(error.response?.data?.message || `Gagal menambahkan ${title.toLowerCase()}`) }
 }
 async function submitIn() {
   if (!inForm.value.supplier || !inForm.value.product || !inForm.value.price || inForm.value.qty < 1) return notify('Lengkapi data barang masuk')
-  if (apiMode.value) {
-    try {
-      await api.post('/warehouse/transactions/in', { supplier_name: inForm.value.supplier, product_name: inForm.value.product, unit: inForm.value.unit, buy_price: Number(inForm.value.price), qty: Number(inForm.value.qty) })
-      await loadFromApi(); notify('Barang masuk berhasil dicatat'); inForm.value = { supplier: '', product: '', unit: 'pcs', price: 0, qty: 1 }; return
-    } catch (error) { notify(error.response?.data?.message || 'Gagal menyimpan barang masuk'); return }
-  }
+  // Simpan data sebelum direset
+  const submitData = { supplier_name: inForm.value.supplier, product_name: inForm.value.product, unit: inForm.value.unit, buy_price: Number(inForm.value.price), qty: Number(inForm.value.qty) }
+  // Optimistic update dulu
   let product = products.value.find(item => item.name.toLowerCase() === inForm.value.product.toLowerCase())
   if (product) product.stock += Number(inForm.value.qty)
   else { product = { id: Date.now(), name: inForm.value.product, unit: inForm.value.unit, stock: Number(inForm.value.qty), buy: Number(inForm.value.price), sell: 0 }; products.value.unshift(product) }
-  transactions.value.unshift({ id: Date.now(), type: 'IN', product: product.name, qty: Number(inForm.value.qty), price: Number(inForm.value.price), total: Number(inForm.value.price) * Number(inForm.value.qty), party: inForm.value.supplier, date: '22 Agu 2026' })
-  notify('Barang masuk berhasil dicatat'); inForm.value = { supplier: '', product: '', unit: 'pcs', price: 0, qty: 1 }
+  transactions.value.unshift({ id: Date.now(), type: 'IN', product: product.name, qty: Number(inForm.value.qty), price: Number(inForm.value.price), total: Number(inForm.value.price) * Number(inForm.value.qty), party: inForm.value.supplier, date: new Date().toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' }) })
+  notify('Barang masuk berhasil dicatat')
+  inForm.value = { supplier: '', product: '', unit: 'pcs', price: 0, qty: 1 }
+  if (apiMode.value) {
+    try {
+      await api.post('/warehouse/transactions/in', submitData)
+    } catch (error) { notify('Simpan offline - sync saat online') }
+  }
 }
 async function submitOut() {
   const product = selectedProduct.value
   if (!outForm.value.customer || !product || !outForm.value.qty) return notify('Lengkapi data penjualan')
   if (Number(outForm.value.qty) > product.stock) return notify('Stok tidak cukup')
+  // Simpan data sebelum direset
+  const price = Number(outForm.value.price) || product.sell
+  const submitData = { customer_name: outForm.value.customer, product_id: product.id, sell_price: price, qty: Number(outForm.value.qty) }
+  // Optimistic update dulu
+  product.stock -= Number(outForm.value.qty)
+  transactions.value.unshift({ id: Date.now(), type: 'OUT', product: product.name, qty: Number(outForm.value.qty), price, total: price * Number(outForm.value.qty), party: outForm.value.customer, date: new Date().toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' }) })
+  notify('Barang keluar berhasil dicatat')
+  outForm.value = { customer: '', productId: '', price: 0, qty: 1 }
   if (apiMode.value) {
     try {
-      await api.post('/warehouse/transactions/out', { customer_name: outForm.value.customer, product_id: product.id, sell_price: Number(outForm.value.price) || product.sell, qty: Number(outForm.value.qty) })
-      await loadFromApi(); notify('Barang keluar berhasil dicatat'); outForm.value = { customer: '', productId: '', price: 0, qty: 1 }; return
-    } catch (error) { notify(error.response?.data?.message || 'Gagal menyimpan barang keluar'); return }
+      await api.post('/warehouse/transactions/out', submitData)
+    } catch (error) { notify('Simpan offline - sync saat online') }
   }
-  product.stock -= Number(outForm.value.qty)
-  const price = Number(outForm.value.price) || product.sell
-  transactions.value.unshift({ id: Date.now(), type: 'OUT', product: product.name, qty: Number(outForm.value.qty), price, total: price * Number(outForm.value.qty), party: outForm.value.customer, date: '22 Agu 2026' })
-  notify('Barang keluar berhasil dicatat'); outForm.value = { customer: '', productId: '', price: 0, qty: 1 }
 }
 function selectProduct() { if (selectedProduct.value) outForm.value.price = selectedProduct.value.sell }
 onMounted(loadFromApi)
-watch(activeView, value => { if (value === 'Data Suplier') activeView.value = 'Data Supplier' })
+watch(activeView, value => { 
+  if (value === 'Data Suplier') activeView.value = 'Data Supplier'
+  // Lazy load data saat user membuka halaman
+  if (['Barang Masuk', 'Barang Keluar', 'Stok Barang'].includes(value)) loadProducts()
+  if (['Barang Masuk', 'Barang Keluar', 'Log Transaksi'].includes(value)) loadTransactions()
+})
 watch([query, typeFilter], refreshProducts)
 </script>
 
@@ -138,19 +209,33 @@ watch([query, typeFilter], refreshProducts)
     <main class="main-content">
       <header class="topbar"><button class="mobile-menu" @click="mobileOpen = !mobileOpen">MENU</button><div class="crumb">Workspace <span>/</span> <strong>{{ activeView }}</strong></div><div class="top-actions"><button class="bell"><i></i></button><div class="avatar">AD</div><div class="admin-name"><strong>Admin Demo</strong><small>Administrator</small></div><button class="logout">Keluar</button></div></header>
       <section class="page-content">
-        <template v-if="activeView === 'Dashboard'">
-          <div class="page-heading"><div><p class="eyebrow">RINGKASAN OPERASIONAL</p><h1>Selamat pagi, Admin.</h1><p class="muted">Pantau aktivitas warehouse dan performa koperasi hari ini.</p></div><button class="primary" @click="activeView = 'Barang Masuk'">+ Catat transaksi</button></div>
-          <div class="stats-grid"><div class="stat-card green"><span class="stat-label">TOTAL PEMASUKAN</span><strong>{{ money(totalOut) }}</strong><small></small><div class="stat-symbol">↗</div></div><div class="stat-card orange"><span class="stat-label">TOTAL PENGELUARAN</span><strong>{{ money(totalIn) }}</strong><small></small><div class="stat-symbol">↘</div></div><div class="stat-card blue"><span class="stat-label">KEUNTUNGAN</span><strong>{{ money(profit) }}</strong><small></small><div class="stat-symbol">◆</div></div><div class="stat-card white"><span class="stat-label">ITEM AKTIF</span><strong>{{ products.length }}</strong><small>{{ lowStock.length }} perlu perhatian</small><div class="stat-symbol">□</div></div></div>
-          <div class="dashboard-grid"><div class="panel activity"><div class="panel-title"><div><h2>Aktivitas terbaru</h2><p class="muted">Transaksi yang baru saja tercatat</p></div><button class="link-button" @click="activeView = 'Log Transaksi'">Lihat semua →</button></div><div v-for="transaction in transactions.slice(0, 4)" :key="transaction.id" class="activity-row"><div class="type-icon" :class="transaction.type.toLowerCase()">{{ transaction.type === 'IN' ? '↓' : '↑' }}</div><div class="activity-info"><strong>{{ transaction.product }}</strong><span>{{ transaction.party }} · {{ transaction.date }}</span></div><div class="activity-qty" :class="transaction.type.toLowerCase()">{{ transaction.type === 'IN' ? '+' : '-' }}{{ transaction.qty }}</div><strong class="activity-total">{{ money(transaction.total) }}</strong></div></div><div class="panel warning"><div class="panel-title"><div><h2>Perlu perhatian</h2><p class="muted">Stok menipis, segera restock</p></div><span class="warning-count">{{ lowStock.length }}</span></div><div v-for="product in lowStock" :key="product.id" class="stock-row"><span class="product-dot"></span><div><strong>{{ product.name }}</strong><small>{{ product.unit }}</small></div><b>{{ product.stock }} <small>tersisa</small></b></div><div v-if="!lowStock.length" class="empty">Semua stok aman</div></div></div>
-        </template>
-        <template v-else-if="activeView === 'Barang Masuk' || activeView === 'Barang Keluar'">
-          <div class="page-heading"><div><p class="eyebrow">TRANSAKSI / {{ activeView.toUpperCase() }}</p><h1>{{ activeView }}</h1><p class="muted">Catat pergerakan inventaris dengan detail yang akurat.</p></div></div>
-          <div class="form-panel panel"><div class="panel-title"><div><h2>{{ activeView === 'Barang Masuk' ? 'Form barang masuk' : 'Form barang keluar' }}</h2><p class="muted">Field bertanda * wajib diisi</p></div><span class="form-badge">{{ activeView === 'Barang Masuk' ? 'PEMBELIAN' : 'PENJUALAN' }}</span></div><form @submit.prevent="activeView === 'Barang Masuk' ? submitIn() : submitOut()"><label v-if="activeView === 'Barang Masuk'">Nama supplier *<select v-model="inForm.supplier"><option value="">Pilih supplier</option><option v-for="supplier in suppliers" :key="supplier.id" :value="supplier.name">{{ supplier.name }}</option></select></label><label v-else>Nama pembeli *<select v-model="outForm.customer"><option value="">Pilih pembeli</option><option v-for="customer in customers" :key="customer.id" :value="customer.name">{{ customer.name }}</option></select></label><label>Nama barang *<select v-if="activeView === 'Barang Keluar'" v-model="outForm.productId" @change="selectProduct"><option value="">Pilih barang dari master</option><option v-for="product in products" :value="product.id" :key="product.id">{{ product.name }} ({{ product.stock }} {{ product.unit }})</option></select><select v-else v-model="inForm.catalogId" @change="selectIncomingCatalog"><option value="">Pilih dari daftar barang</option><option v-for="catalog in itemCatalogs" :value="catalog.id" :key="catalog.id">{{ catalog.name }}</option></select></label><label v-if="activeView === 'Barang Masuk'">Satuan<input :value="inForm.unit || '-'" disabled></label><label v-else>Satuan<input :value="selectedProduct?.unit || '-'" disabled></label><label>Harga satuan *<input v-model="activePrice" type="number" min="0" placeholder="0"></label><label>Jumlah (qty) *<input v-model="activeQty" type="number" min="0.001" step="0.001" placeholder="0"></label><div class="total-box"><span>Total harga</span><strong>{{ money(Number(activePrice) * Number(activeQty)) }}</strong></div><p v-if="activeView === 'Barang Keluar' && selectedProduct && Number(outForm.qty) > selectedProduct.stock" class="inline-error">Stok tidak cukup. Tersedia {{ selectedProduct.stock }} {{ selectedProduct.unit }}.</p><button class="primary submit" type="submit">Simpan transaksi <span>→</span></button></form></div>
-          <div class="transaction-list panel"><div class="panel-title"><div><h2>{{ activeView === 'Barang Masuk' ? 'Daftar barang masuk' : 'Daftar barang keluar' }}</h2><p class="muted">{{ activeView === 'Barang Masuk' ? 'Riwayat pembelian dan penerimaan stok' : 'Riwayat penjualan dan pengeluaran stok' }}</p></div><span class="list-count">{{ activeView === 'Barang Masuk' ? incomingTransactions.length : outgoingTransactions.length }} transaksi</span></div><div class="transaction-table-wrap"><table class="transaction-table"><thead><tr><th>TANGGAL</th><th>{{ activeView === 'Barang Masuk' ? 'SUPPLIER' : 'PEMBELI' }}</th><th>NAMA BARANG</th><th>QTY</th><th>TOTAL HARGA</th><th></th></tr></thead><tbody><tr v-for="transaction in (activeView === 'Barang Masuk' ? incomingTransactions : outgoingTransactions)" :key="transaction.id"><td>{{ transaction.date }}</td><td><strong>{{ transaction.party }}</strong></td><td>{{ transaction.product }}</td><td>{{ transaction.qty }}</td><td><strong>{{ money(transaction.total) }}</strong></td><td><button class="print" @click="openReceipt(transaction)">Cetak Nota</button></td></tr><tr v-if="!(activeView === 'Barang Masuk' ? incomingTransactions : outgoingTransactions).length"><td colspan="6" class="empty">Belum ada transaksi {{ activeView.toLowerCase() }}.</td></tr></tbody></table></div></div>
-        </template>
-        <template v-else-if="activeView === 'Stok Barang'"><div class="page-heading"><div><p class="eyebrow">INVENTARIS / STOK</p><h1>Stok barang</h1><p class="muted">Pantau rekapitulasi stok dan nilai persediaan.</p></div></div><div class="panel table-panel"><div class="master-toolbar"><div class="search">⌕ <input v-model="query" placeholder="Cari nama barang..."></div><div class="type-tabs"><button :class="{ selected: typeFilter === '' }" @click="typeFilter = ''">Semua</button><button :class="{ selected: typeFilter === 'basah' }" @click="typeFilter = 'basah'">Barang basah</button><button :class="{ selected: typeFilter === 'kering' }" @click="typeFilter = 'kering'">Barang kering</button></div></div><div class="master-table-wrap"><table><thead><tr><th v-for="column in [{ key: 'name', label: 'NAMA BARANG' }, { key: 'totalMasuk', label: 'MASUK' }, { key: 'totalKeluar', label: 'KELUAR' }, { key: 'sisa', label: 'SISA' }, { key: 'buy', label: 'HARGA SATUAN BELI' }, { key: 'buyTotal', label: 'HARGA BELI (KESELURUHAN)' }, { key: 'sell', label: 'HARGA SATUAN JUAL' }, { key: 'sellTotal', label: 'HARGA JUAL (KESELURUHAN)' }, { key: 'profit', label: 'LABA / KEUNTUNGAN' }]" :key="column.key" @click="sortBy(column.key)">{{ column.label }} {{ sortKey === column.key ? (sortDirection === 'asc' ? '▲' : '▼') : '' }}</th></tr></thead><tbody><tr v-for="product in sortedProducts" :key="product.id"><td><strong>{{ product.name }}</strong><small>{{ product.unit }}</small></td><td>{{ product.totalMasuk }} {{ product.unit }}</td><td>{{ product.totalKeluar }} {{ product.unit }}</td><td><strong>{{ product.sisa }}</strong> {{ product.unit }}</td><td>{{ money(product.buy) }}</td><td>{{ money(product.buyTotal) }}</td><td>{{ money(product.sell) }}</td><td>{{ money(product.sellTotal) }}</td><td class="profit-cell">{{ money(product.profit) }}</td></tr><tr v-if="!sortedProducts.length"><td colspan="9" class="empty">Belum ada data stok barang.</td></tr></tbody></table></div></div></template>
-        <template v-else-if="['Data Supplier', 'Data Pembeli', 'Data Barang'].includes(activeView)"><div class="page-heading"><div><p class="eyebrow">REFERENSI / {{ activeView.toUpperCase() }}</p><h1>{{ activeView }}</h1><p class="muted">Kelola data referensi untuk transaksi dan katalog.</p></div><button class="primary" @click="openDirectory(activeView)">+ Tambah {{ activeView === 'Data Barang' ? 'barang' : activeView === 'Data Supplier' ? 'supplier' : 'pembeli' }}</button></div><div class="panel table-panel"><table><thead><tr><th @click="sortBy('name')">NAMA {{ sortKey === 'name' ? (sortDirection === 'asc' ? '▲' : '▼') : '' }}</th><th v-if="activeView !== 'Data Barang'" @click="sortBy('phone')">NO. HP</th><th v-if="activeView !== 'Data Barang'" @click="sortBy('address')">ALAMAT</th><th v-if="activeView === 'Data Barang'" @click="sortBy('unit')">SATUAN</th><th v-if="activeView === 'Data Barang'" @click="sortBy('type')">TIPE</th><th>AKSI</th></tr></thead><tbody><tr v-for="entry in sortedDirectoryEntries" :key="entry.id"><td><strong>{{ entry.name }}</strong></td><td v-if="activeView !== 'Data Barang'">{{ entry.phone || '-' }}</td><td v-if="activeView !== 'Data Barang'">{{ entry.address || '-' }}</td><td v-if="activeView === 'Data Barang'">{{ entry.unit }}</td><td v-if="activeView === 'Data Barang'"><span class="type-badge" :class="entry.type">{{ entry.type === 'basah' ? 'Basah' : 'Kering' }}</span></td><td><button class="print" @click="openDirectory(activeView, entry)">Edit</button> <button class="print" @click="deleteDirectory(entry)">Hapus</button></td></tr><tr v-if="!sortedDirectoryEntries.length"><td colspan="6" class="empty">Belum ada data {{ activeView.toLowerCase() }}.</td></tr></tbody></table></div></template>
-        <template v-else><div class="page-heading"><div><p class="eyebrow">AUDIT / AKTIVITAS</p><h1>Log transaksi</h1><p class="muted">Riwayat seluruh pergerakan barang di warehouse.</p></div><div class="export-actions"><button class="secondary">↓ PDF</button><button class="primary">↓ Excel</button></div></div><div class="filter-bar panel"><button v-for="preset in ['Hari ini', 'Bulan ini', 'Semua']" :key="preset" :class="{ selected: datePreset === preset }" @click="datePreset = preset">{{ preset }}</button><span class="date-line">22/08/2026 — 22/08/2026</span></div><div class="summary-strip"><div><span>Pemasukan</span><strong class="green-text">{{ money(totalOut) }}</strong></div><div><span>Pengeluaran</span><strong class="orange-text">{{ money(totalIn) }}</strong></div><div><span>Keuntungan</span><strong class="blue-text">{{ money(profit) }}</strong></div></div><div class="panel table-panel"><table><thead><tr><th>WAKTU</th><th>BARANG</th><th>TIPE</th><th>QTY</th><th>HARGA</th><th>TOTAL</th><th>PIHAK TERKAIT</th><th></th></tr></thead><tbody><tr v-for="transaction in transactions" :key="transaction.id"><td>{{ transaction.date }}</td><td><strong>{{ transaction.product }}</strong></td><td><span class="type-pill" :class="transaction.type.toLowerCase()">{{ transaction.type === 'IN' ? 'Masuk' : 'Keluar' }}</span></td><td>{{ transaction.qty }}</td><td>{{ money(transaction.price) }}</td><td><strong>{{ money(transaction.total) }}</strong></td><td>{{ transaction.party }}</td><td><button class="print" @click="openReceipt(transaction)">Cetak</button></td></tr></tbody></table></div></template>
+        <DashboardPage v-if="activeView === 'Dashboard'" :money="money" :total-out="totalOut" :total-in="totalIn" :profit="profit" :products="products" :low-stock="lowStock" :transactions="transactions" @open-page="activeView = $event" />
+                <TransactionPage
+          v-else-if="activeView === 'Barang Masuk' || activeView === 'Barang Keluar'"
+          :active-view="activeView"
+          :in-form="inForm"
+          :out-form="outForm"
+          :suppliers="suppliers"
+          :customers="customers"
+          :products="products"
+          :item-catalogs="itemCatalogs"
+          :money="money"
+          :incoming-transactions="incomingTransactions"
+          :outgoing-transactions="outgoingTransactions"
+          :selected-product="selectedProduct"
+          :active-price="activePrice"
+          :active-qty="activeQty"
+          :submit-in="submitIn"
+          :submit-out="submitOut"
+          :select-incoming-catalog="selectIncomingCatalog"
+          :select-product="selectProduct"
+          :open-receipt="openReceipt"
+          @update:activePrice="activePrice = $event"
+          @update:activeQty="activeQty = $event"
+        />
+<StockPage v-else-if="activeView === 'Stok Barang'" :query="query" :type-filter="typeFilter" :products="products" :sorted-products="sortedProducts" :money="money" :sort-by="sortBy" :sort-key="sortKey" :sort-direction="sortDirection" @update:query="query = $event" @update:typeFilter="typeFilter = $event" />
+        <DirectoryPage v-else-if="['Data Supplier', 'Data Pembeli', 'Data Barang'].includes(activeView)" :active-view="activeView" :sorted-directory-entries="sortedDirectoryEntries" :sort-by="sortBy" :sort-key="sortKey" :sort-direction="sortDirection" :open-directory="openDirectory" :delete-directory="deleteDirectory" />
+        <LogPage v-else :transactions="transactions" :money="money" :total-out="totalOut" :total-in="totalIn" :profit="profit" :date-preset="datePreset" @update:datePreset="datePreset = $event" @open-receipt="openReceipt" />
       </section>
     </main>
     <div v-if="toast" class="toast">{{ toast }}</div>

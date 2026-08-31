@@ -12,25 +12,43 @@ class WarehouseController extends Controller
 {
     public function dashboard(Request $request)
     {
-        $transactions = $this->filtered($request)->get();
-        return response()->json([
-            'income' => $transactions->where('type', 'OUT')->sum('total_price'),
-            'expense' => $transactions->where('type', 'IN')->sum('total_price'),
-            'profit' => $transactions->where('type', 'OUT')->sum(fn ($item) => ($item->sell_price - $item->buy_price) * $item->qty),
-            'incoming_qty' => $transactions->where('type', 'IN')->sum('qty'),
-            'outgoing_qty' => $transactions->where('type', 'OUT')->sum('qty'),
-            'low_stock' => Product::where('stock', '<=', 5)->get(),
-        ]);
+        return response()->json(
+            \Illuminate\Support\Facades\Cache::remember('dashboard_stats', 300, function () {
+                $transactions = Transaction::get();
+                $lowStock = Product::where('stock', '<=', 5)->select('id', 'name', 'stock', 'unit')->get();
+                return [
+                    'income' => $transactions->where('type', 'OUT')->sum('total_price'),
+                    'expense' => $transactions->where('type', 'IN')->sum('total_price'),
+                    'profit' => $transactions->where('type', 'OUT')->sum(fn ($item) => ($item->sell_price - $item->buy_price) * $item->qty),
+                    'incoming_qty' => $transactions->where('type', 'IN')->sum('qty'),
+                    'outgoing_qty' => $transactions->where('type', 'OUT')->sum('qty'),
+                    'low_stock' => $lowStock,
+                ];
+            })
+        );
     }
 
     public function products(Request $request)
     {
-        return Product::query()->when($request->search, fn ($query, $search) => $query->where('name', 'like', "%{$search}%"))->latest()->paginate(20);
+        return Product::query()
+            ->select('id', 'name', 'unit', 'stock', 'buy_price', 'sell_price', 'type')
+            ->when($request->search, fn ($query, $search) => $query->where('name', 'like', "%{$search}%"))
+            ->latest()
+            ->paginate(20);
     }
 
     public function transactions(Request $request)
     {
-        return response()->json(['data' => $this->filtered($request)->with(['product', 'admin'])->latest()->paginate(30)] + ['stats' => $this->stats($request)]);
+        $transactions = $this->filtered($request)
+            ->with(['product:id,name,unit', 'admin:id,name'])
+            ->select('id', 'type', 'product_id', 'admin_id', 'customer_name', 'supplier_name', 'qty', 'buy_price', 'sell_price', 'total_price', 'created_at')
+            ->latest()
+            ->paginate(15);
+
+        return response()->json([
+            'data' => $transactions,
+            'stats' => $this->stats($request),
+        ]);
     }
 
     public function storeIn(Request $request)
